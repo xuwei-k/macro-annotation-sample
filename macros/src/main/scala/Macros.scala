@@ -1,19 +1,31 @@
+package scalaz
+
 import scala.annotation.StaticAnnotation
 import scala.reflect.macros.whitebox._
 import language.experimental.macros
 
-trait Foo[A]
-
-class mkCompanion extends StaticAnnotation {
-  def macroTransform(annottees: Any*): Any = macro mkCompanionMacro.impl
+class liftFC extends StaticAnnotation {
+  def macroTransform(annottees: Any*): Any = macro liftFC.impl
 }
-object mkCompanionMacro {
+
+object liftFC {
   def impl(c: Context)(annottees: c.Expr[Any]*): c.Expr[Any] = {
     import c.universe._
 
     val inputs : List[Tree] = annottees.map(_.tree)(collection.breakOut)
     val outputs: List[Tree] = inputs match {
-      case (cd @ ClassDef(_, cName, _, _)) :: tail =>
+      case (cd @ ClassDef(_, cName, types, templates)) :: tail =>
+
+        val liftMethod: c.universe.DefDef =
+          templates.children.collectFirst {
+            case DefDef(_, _, _, vals :: _, _, _) =>
+              val body = q"{scalaz.Free.liftFC(new ${cName.toTypeName}(..${vals.map(_.name)}) )}"
+              DefDef(Modifiers(), TermName("lift"), types, vals :: Nil, TypeTree(), body)
+          }.getOrElse{
+            c.abort(c.enclosingPosition, s"$cName does not have a case class constructor?")
+          }
+        // println(showCode(liftMethod))
+
         val mod0: ModuleDef = tail match {
           case (md @ ModuleDef(_, mName, mTemp)) :: Nil 
             if cName.decodedName.toString == mName.decodedName.toString => md
@@ -43,15 +55,20 @@ object mkCompanionMacro {
 
         val Template(mTempParents, mTempSelf, mTempBody0) = mod0.impl
 
-        val cTpe        = Ident(cd.name.decodedName)
-        val fooDef      = q"implicit def hasFoo: Foo[$cTpe] = new Foo[$cTpe]{}"
-        val mTempBody1  = fooDef :: mTempBody0
+        val mTempBody1  = liftMethod :: mTempBody0
         val mTemp1      = Template(mTempParents, mTempSelf, mTempBody1)
         val mod1        = ModuleDef(mod0.mods, mod0.name, mTemp1)
 
         cd :: mod1 :: Nil
 
-      case _ => c.abort(c.enclosingPosition, "Must annotate a class or trait")
+      case (mDef @ ModuleDef(_, name, _)) :: Nil=>
+        val body = q"scalaz.Free.liftFC($name)"
+        val lift = ValDef(Modifiers(), TermName("lift"), TypeTree(), body)
+        val Template(parents, self, body0) = mDef.impl
+        val template = Template(parents, self, lift :: body0)
+        ModuleDef(mDef.mods, mDef.name, template) :: Nil
+      case other =>
+        c.abort(c.enclosingPosition, "Must annotate a class or trait or object")
     }
 
     c.Expr[Any](Block(outputs, Literal(Constant(()))))

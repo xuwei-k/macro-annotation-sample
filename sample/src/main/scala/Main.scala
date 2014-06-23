@@ -1,20 +1,24 @@
+import scalaz.liftFC
 
 object Bar {
   def aaa = 1
 }
 
-@mkCompanion class Bar
+@liftFC case class Bar[A](aaa: Int, bbb: A){
+  def ccc = 9
+}
 
-@mkCompanion class Baz
+sealed trait Baz[A]
+@liftFC object Foo extends Baz[Int] {
+  def bbb = 9
+}
 
 
 object Main {
 
-  println(Baz.hasFoo)
-  println(Bar.hasFoo)
+  println(Bar.lift(1,"a"): scalaz.Free.FreeC[Bar, String])
   println(Bar.aaa)
-
-  implicitly[Foo[Bar]]
-  implicitly[Foo[Baz]]
+  println(Foo.lift: scalaz.Free.FreeC[Baz, Int])
+  println(Foo.bbb)
 
 }

@@ -1,7 +1,7 @@
 lazy val commonSettings = Seq(
   scalaVersion := "2.11.1",
   scalacOptions += "-deprecation",
-  libraryDependencies += "org.scalaz" %% "scalaz-core" % "7.1.0-M7",
+  libraryDependencies += "com.typesafe.akka" %% "akka-actor" % "2.3.3",
   addCompilerPlugin("org.scalamacros" % "paradise" % "2.1.0-M1" cross CrossVersion.full)
 )
 

@@ -1,15 +1,10 @@
 import actormacro.create
 
-import akka.actor.{ActorSystem, Actor}
+@create abstract class FoldableOps[F[_], A](self: F[A])
 
-@create class A(a: Int, b: String) extends Actor {
-  override def receive = {
-    case message =>
-      println(message)
-  }
-}
+//@create class MonadOps
+
+//@create class FunctorOps
 
 object Main {
-  implicit val system = ActorSystem.apply("hoge")
-  A.create(1, "a")
 }

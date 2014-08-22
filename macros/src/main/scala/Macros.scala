@@ -14,25 +14,79 @@ object create {
 
     val inputs : List[Tree] = annottees.map(_.tree)(collection.breakOut)
     val outputs: List[Tree] = inputs match {
-      case (cd @ ClassDef(_, cName, types, templates)) :: tail =>
-        val createMethod =
-          templates.children.collectFirst {
-            case DefDef(_, _, _, vals :: _, _, _) =>
-              q"""
-                def create(..${vals})(implicit system: akka.actor.ActorSystem): akka.actor.ActorRef = {
-                  system.actorOf(akka.actor.Props(classOf[${cName.toTypeName}], ..${vals.map(_.name)}))
-                }"""
-          }.getOrElse{
-            c.abort(c.enclosingPosition, s"$cName does not have a case class constructor?")
-          }
-        // println(showCode(createMethod))
+      case (classDef @ ClassDef(_, cName @ TypeName(className), types, templates)) :: tail =>
+        val cc = c.mirror.staticClass("scalaz." + className.replace("Ops", "")).toType
+        val methods = cc.decls.collect{case m: MethodSymbol => m}
+        val F = cc.typeParams.head.typeSignature.erasure
+        val hasF = methods.filter(_.typeParams.nonEmpty).map{ method =>
+          method -> method.paramLists.map{ params =>
+            params.map{ param =>
+              val t = param.typeSignatureIn(cc)
+              PartialFunction.condOpt(t.typeArgs){
+                case arg :: Nil =>
+                  try{
+                    cc.typeParams.head.asType.toType.typeConstructor =:= t.typeConstructor
+                  }catch{
+                    case _: NoSuchElementException => false
+                  }
+              }.getOrElse(false)
+            }.zipWithIndex.filter(_._1).map(_._2)
+          }.zipWithIndex.collect{
+            case (x, i) if x.nonEmpty => x.map(i -> _)
+          }.flatten
+        }.filter(_._2.nonEmpty)
+
+        if(hasF.forall(_._2.size != 1)){
+          println(hasF.groupBy(_._2.size).map{case (k, v) => k -> v.size})
+        }else{
+          println(hasF.groupBy(_._2).map{case (k, v) => k -> v.size})
+        }
+
+        println(hasF.size)
+
+        val newMethods = hasF.map{ case (method, index :: Nil) =>
+          val newParams = method.paramLists.zipWithIndex.map{
+            case (params, j1) =>
+              params.zipWithIndex.collect{
+                case (param, j2) if index != (j1, j2) => param
+              }
+          }.filter(_.nonEmpty)
+
+          def symbol2typeDef(s: Symbol): TypeDef =
+            TypeDef(
+              NoMods,
+              s.name.toTypeName,
+              s.asType.typeParams.map(s => symbol2typeDef(s)),
+              EmptyTree
+            )
+
+          def symbol2valdef(s: Symbol): ValDef = ValDef(
+            Modifiers(Flag.PARAM),
+            s.name.toTermName,
+            TypeTree(s.typeSignature),
+            EmptyTree
+          )
+
+          DefDef(
+            NoMods,
+            method.name,
+            method.typeParams.map(t => symbol2typeDef(t)).filter(_.name.toString != "A"), // TODO
+            newParams.map(_.map(s => symbol2valdef(s))),
+            TypeTree(method.returnType),
+            EmptyTree
+          )
+        }
+
+        val createMethod = q""
+
+        println(newMethods.map(t => showCode(t)).mkString("\n"))
 
         val mod0: ModuleDef = tail match {
           case (md @ ModuleDef(_, mName, mTemp)) :: Nil 
             if cName.decodedName.toString == mName.decodedName.toString => md
 
           case Nil =>
-            val cMod  = cd.mods
+            val cMod  = classDef.mods
             var mModF = NoFlags
             if (cMod hasFlag Flag.PRIVATE  ) mModF |= Flag.PRIVATE
             if (cMod hasFlag Flag.PROTECTED) mModF |= Flag.PROTECTED
@@ -60,13 +114,24 @@ object create {
         val mTemp1      = Template(mTempParents, mTempSelf, mTempBody1)
         val mod1        = ModuleDef(mod0.mods, mod0.name, mTemp1)
 
-        cd :: mod1 :: Nil
+        val newClassDef = ClassDef(
+          classDef.mods, classDef.name, classDef.tparams,
+          Template(
+            classDef.impl.parents,
+            classDef.impl.self,
+            classDef.impl.body ::: newMethods.toList
+          )
+        )
+
+        newClassDef :: mod1 :: Nil
 
       case other =>
         c.abort(c.enclosingPosition, "Must annotate a class or trait")
     }
 
-    c.Expr[Any](Block(outputs, Literal(Constant(()))))
+    val expr = c.Expr[Any](Block(outputs, Literal(Constant(()))))
+    println(expr.tree)
+    expr
   }
 }
 

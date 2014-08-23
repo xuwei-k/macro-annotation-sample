@@ -1,21 +1,40 @@
-package actormacro
+package macroz
 
 import scala.annotation.StaticAnnotation
-import scala.reflect.macros.whitebox._
-import language.experimental.macros
+import scala.reflect.macros.whitebox.Context
+import scala.language.experimental.macros
 
 class create extends StaticAnnotation {
-  def macroTransform(annottees: Any*): Any = macro create.impl
+  def macroTransform(annottees: Any*): Any = macro Impl.impl
 }
 
-object create {
-  def impl(c: Context)(annottees: c.Expr[Any]*): c.Expr[Any] = {
-    import c.universe._
+final class Impl(val c: Context) {
+  import c.universe._
 
-    val inputs : List[Tree] = annottees.map(_.tree)(collection.breakOut)
+  private def symbol2typeDef(s: Symbol): TypeDef = TypeDef(
+    Modifiers(Flag.PARAM),
+    s.name.toTypeName,
+    s.asType.typeParams.map(s => symbol2typeDef(s)),
+    TypeBoundsTree(TypeTree(), TypeTree())
+  )
+
+  private def symbol2valdef(s: Symbol): ValDef = {
+    val flags = if(s.isImplicit) Flag.PARAM | Flag.IMPLICIT else Flag.PARAM
+    ValDef(
+      Modifiers(flags),
+      s.name.toTermName,
+      TypeTree(s.typeSignature),
+      EmptyTree
+    )
+  }
+
+  def impl(annottees: c.Tree*): c.Expr[Any] = {
+
+    val inputs : List[Tree] = annottees.toList
     val outputs: List[Tree] = inputs match {
       case (classDef @ ClassDef(_, cName @ TypeName(className), types, templates)) :: tail =>
-        val cc = c.mirror.staticClass("scalaz." + className.replace("Ops", "")).toType
+        val typeClassName = "scalaz." + className.replace("Ops", "")
+        val cc = c.mirror.staticClass(typeClassName).toType
         val methods = cc.decls.collect{case m: MethodSymbol => m}
         val F = cc.typeParams.head.typeSignature.erasure
         val hasF = methods.filter(_.typeParams.nonEmpty).map{ method =>
@@ -25,7 +44,9 @@ object create {
               PartialFunction.condOpt(t.typeArgs){
                 case arg :: Nil =>
                   try{
-                    cc.typeParams.head.asType.toType.typeConstructor =:= t.typeConstructor
+                    val isA = arg.toString == "A"
+                    val const = cc.typeParams.head.asType.toType.typeConstructor =:= t.typeConstructor
+                    isA && const && (!arg.typeConstructor.takesTypeArgs)
                   }catch{
                     case _: NoSuchElementException => false
                   }
@@ -35,12 +56,6 @@ object create {
             case (x, i) if x.nonEmpty => x.map(i -> _)
           }.flatten
         }.filter(_._2.nonEmpty)
-
-        if(hasF.forall(_._2.size != 1)){
-          println(hasF.groupBy(_._2.size).map{case (k, v) => k -> v.size})
-        }else{
-          println(hasF.groupBy(_._2).map{case (k, v) => k -> v.size})
-        }
 
         println(hasF.size)
 
@@ -52,70 +67,40 @@ object create {
               }
           }.filter(_.nonEmpty)
 
-          def symbol2typeDef(s: Symbol): TypeDef =
-            TypeDef(
-              Modifiers(Flag.PARAM),
-              s.name.toTypeName,
-              s.asType.typeParams.map(s => symbol2typeDef(s)),
-              TypeBoundsTree(TypeTree(), TypeTree())
-            )
-
-          def symbol2valdef(s: Symbol): ValDef = ValDef(
-            Modifiers(Flag.PARAM),
-            s.name.toTermName,
-            TypeTree(s.typeSignature),
-            EmptyTree
-          )
+          val body = method.paramLists.zipWithIndex.foldLeft(
+            q"this.F.${method.name}" : Tree
+          ) {
+            case (tree, (params, i)) =>
+              if(params.head.isImplicit) {
+                tree
+              }else{
+                Apply(
+                  tree,
+                  params.zipWithIndex.map{ case (a, j) =>
+                    if((i, j) == index){
+                      q"self"
+                    }else{
+                      q"$a"
+                    }
+                  }
+                )
+              }
+          }
 
           DefDef(
             NoMods,
             method.name,
-            method.typeParams.map(t => symbol2typeDef(t)).filter(_.name.toString != "A"), // TODO
+            method.typeParams.map(t => symbol2typeDef(t)).filter(_.name.toString != "A"),
             newParams.map(_.map(s => symbol2valdef(s))),
             TypeTree(method.returnType),
-            EmptyTree
+            body
           )
         }
 
-        val createMethod = q""
-
-        println(newMethods.map(t => showCode(t)).mkString("\n"))
-
-        val mod0: ModuleDef = tail match {
-          case (md @ ModuleDef(_, mName, mTemp)) :: Nil 
-            if cName.decodedName.toString == mName.decodedName.toString => md
-
-          case Nil =>
-            val cMod  = classDef.mods
-            var mModF = NoFlags
-            if (cMod hasFlag Flag.PRIVATE  ) mModF |= Flag.PRIVATE
-            if (cMod hasFlag Flag.PROTECTED) mModF |= Flag.PROTECTED
-            if (cMod hasFlag Flag.LOCAL    ) mModF |= Flag.LOCAL
-            val mMod = Modifiers(mModF, cMod.privateWithin, Nil)
-
-            val mkSuperSelect = Select(Super(This(typeNames.EMPTY), typeNames.EMPTY), 
-                                       termNames.CONSTRUCTOR)
-            val superCall     = Apply(mkSuperSelect, Nil)
-            val constr        = DefDef(NoMods, termNames.CONSTRUCTOR, Nil, List(Nil), 
-              TypeTree(), Block(List(superCall), Literal(Constant(()))))
-
-            val mTemp = Template(parents = List(TypeTree(typeOf[AnyRef])), 
-              self = noSelfType, body = constr :: Nil)
-            val mName = TermName(cName.decodedName.toString)
-
-            ModuleDef(mMod, mName, mTemp)
-
-          case _ => c.abort(c.enclosingPosition, "Expected a companion object")
-        }
-
-        val Template(mTempParents, mTempSelf, mTempBody0) = mod0.impl
-
-        val mTempBody1  = createMethod :: mTempBody0
-        val mTemp1      = Template(mTempParents, mTempSelf, mTempBody1)
-        val mod1        = ModuleDef(mod0.mods, mod0.name, mTemp1)
-
         val newClassDef = ClassDef(
-          classDef.mods, classDef.name, classDef.tparams,
+          classDef.mods,
+          classDef.name,
+          classDef.tparams,
           Template(
             classDef.impl.parents,
             classDef.impl.self,
@@ -123,8 +108,7 @@ object create {
           )
         )
 
-        newClassDef :: mod1 :: Nil
-
+        newClassDef :: tail
       case other =>
         c.abort(c.enclosingPosition, "Must annotate a class or trait")
     }

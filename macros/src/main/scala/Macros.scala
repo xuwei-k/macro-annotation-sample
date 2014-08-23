@@ -54,10 +54,10 @@ object create {
 
           def symbol2typeDef(s: Symbol): TypeDef =
             TypeDef(
-              NoMods,
+              Modifiers(Flag.PARAM),
               s.name.toTypeName,
               s.asType.typeParams.map(s => symbol2typeDef(s)),
-              EmptyTree
+              TypeBoundsTree(TypeTree(), TypeTree())
             )
 
           def symbol2valdef(s: Symbol): ValDef = ValDef(
